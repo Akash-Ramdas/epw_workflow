@@ -1150,7 +1150,58 @@ class pw_file(qe_input):
         cell_card = cell_parameters_card(struc.lattice)
         kpts_tmp = kpoints_card()
         kpts_tmp.init_automatic_grid(struc=struc, rden=rden)
-        kpts = kmesh_pl_pyth(nk1=kpts_tmp.num_k[0], nk2=kpts_tmp.num_k[1], nk3=kpts_tmp.num_k[2])
+        nk_mesh = np.zeros(3, dtype=int)
+        # Ensure mesh is even to construct commensurate k grid later
+        for imesh in range(0, 3):
+            if kpts_tmp.num_k[imesh] == 1:
+                nk_mesh[imesh] = 1
+            elif kpts_tmp.num_k[imesh]%2 == 1:
+                nk_mesh[imesh] = kpts_tmp.num_k[imesh]+1
+            else:
+                nk_mesh[imesh] = kpts_tmp.num_k[imesh]
+        
+        kpts = kmesh_pl_pyth(nk1=nk_mesh[0], nk2=nk_mesh[1], nk3=nk_mesh[2])
+        self.namelists = dict(CONTROL=control, SYSTEM=system, 
+        ELECTRONS=electrons, IONS=ions, CELL=cell)
+
+        self.cards = dict(ATOMIC_SPECIES=at_species, ATOMIC_POSITIONS=at_pos,
+                          CELL_PARAMETERS=cell_card, K_POINTS=kpts)
+    
+    def init_default_vcrel_file(self, struc: Structure, prefix: str, rden: float = 6,
+                          pseudo_dir: FileType = "./",  outdir: FileType = "./tmp", 
+                          lsoc: bool = True, perturb_cell: bool = False):
+        self.structure = struc.copy()
+        cart_coords = struc.cart_coords
+        lattice_info = struc.lattice.matrix.copy()
+        pert_fac = 0
+        if perturb_cell:
+            pert_fac = 1
+
+        #cart_coords = cart_coords + rng.random(cart_coords.shape) / 10
+        seed = 0
+        rng = np.random.default_rng(seed=seed)
+        lattice_info = lattice_info + pert_fac*rng.random(lattice_info.shape) / 10
+        relax_struc = Structure(lattice=lattice_info, species=struc.species,
+                                coords=cart_coords, coords_are_cartesian=True)
+
+        control: control_nl = control_nl()
+        control.init_control(calc_prefix=prefix, pseudo_dir=pseudo_dir, outdir=outdir)
+        control.update_nl_params({"calculation": "vc-relax"})
+        system = system_nl()
+        system.init_system(struc, lsoc=lsoc, pseudo_dir=pseudo_dir)
+        system.add_nl_params({"nosym": True})
+        electrons = electrons_nl()
+        electrons.init_default()
+        ions = ions_nl()
+        ions.init_default()
+        cell = cell_nl()
+        cell.init_default()
+        at_species = atomic_species_card(relax_struc)
+        at_pos = atomic_positions_card(relax_struc)
+        at_pos.fix_atoms(np.array([0]))
+        cell_card = cell_parameters_card(relax_struc.lattice)
+        kpts = kpoints_card()
+        kpts.init_automatic_grid(struc=relax_struc, rden=rden)
         self.namelists = dict(CONTROL=control, SYSTEM=system, 
         ELECTRONS=electrons, IONS=ions, CELL=cell)
 
@@ -1167,7 +1218,7 @@ class projwfc_nl(nl_object):
         super().__init__(param_dict)
         self.nl_name = "&PROJWFC"
 
-    def init_def_projwfc(self, calc_prefix: str, fermi_level: float,
+    def init_def_projwfc(self, calc_prefix: str, fermi_level: float = None,
                          additional_options: Dict[str, allowed_nl_types] = None):
         """
         Initializes a default projwfc namelist, with a spacing of 0.0001eV, and
@@ -1181,8 +1232,9 @@ class projwfc_nl(nl_object):
         self.reset_nl_dict_to_empty()
         self.nl_dict["prefix"] = calc_prefix
         self.nl_dict["outdir"] = "./tmp/"
-        self.nl_dict["Emin"] = fermi_level - 5
-        self.nl_dict["Emax"] = fermi_level + 5
+        if fermi_level is not None:
+            self.nl_dict["Emin"] = fermi_level - 5
+            self.nl_dict["Emax"] = fermi_level + 5
         self.nl_dict["DeltaE"] = 0.0001
         self.nl_dict["filproj"] = "{}_proj".format(calc_prefix)
 
@@ -1303,7 +1355,8 @@ class inputph_nl(nl_object):
         super().__init__(param_dict)
         self.nl_name = "PH_CALC\n&INPUTPH"
 
-    def init_default_grid(self, calc_prefix: str, rden: float, struc: Structure, xml_dyn=True):
+    def init_default_grid(self, calc_prefix: str, rden: float, struc: Structure, xml_dyn=True,
+                          make_commensurate: bool =True):
         self.reset_nl_dict_to_empty()
         self.nl_dict["prefix"] = calc_prefix
         self.nl_dict["outdir"] = "./tmp/"
@@ -1317,6 +1370,9 @@ class inputph_nl(nl_object):
             self.nl_dict["fildyn"] = "{}.dyn".format(calc_prefix)
             self.nl_dict["fildvscf"] = "dvscf"
         self.nl_dict["ldisp"] = True
+        self.nl_dict["nmix_ph"] = 10
+        self.nl_dict["reduce_io"] = True
+        self.nl_dict["recover"] = False
         #self.nl_dict["electron_phonon"] = "simple"
 
         num_q = np.zeros(3)
@@ -1392,13 +1448,14 @@ class ph_input(qe_input):
         self.prefix = "default"
 
     def init_default(self, calc_prefix: str, struc: Structure, rden: float, lgrid: bool = True, lband: bool = False,
-                 inputph: inputph_nl = None, qPtSpec: qPoints = None):
+                 inputph: inputph_nl = None, qPtSpec: qPoints = None, make_commensurate=True):
         self.prefix = calc_prefix
         if inputph is None:
             if lgrid:
                 lband = False
                 inputph = inputph_nl()
-                inputph.init_default_grid(calc_prefix=calc_prefix, rden=rden, struc=struc)
+                inputph.init_default_grid(calc_prefix=calc_prefix, rden=rden, struc=struc, 
+                                          make_commensurate=make_commensurate)
             else:
                 if lband:
                     if inputph is None:
@@ -1494,7 +1551,7 @@ class kpoints_wan_block(kpoints_card):
 
 
 class wann_file:
-    def __init__(self, n_wfc: int, n_bnd: int, nk: NDArrayInt, wan_nscf: pw_file, wannier_inputs: Dict[str, object] = None,
+    def __init__(self, n_wfc: int, n_bnd: int, nk: NDArrayInt, struc: Structure, wannier_inputs: Dict[str, object] = None,
                  plot_bands: bool = True, plot_wfs: bool = True, exclude_str=None):
 
         self.wannier_inputs = {"num_wann": n_wfc,
@@ -1520,18 +1577,18 @@ class wann_file:
                                         "bands_num_points": 50})
         if plot_wfs:
             self.wannier_inputs.update({"wannier_plot": "true"})
-        self.structure = wan_nscf.structure.copy()
+        self.structure = struc.copy()
 
         self.ap_block = atomic_positions_wan_block(struc=self.structure)
 
         self.kpoints = kpoints_wan_block()
         self.kpoints.init_klist(kpoints_array=kmesh_pl_pyth(nk[0], nk[1], nk[2]).kpoints_array)
-        self.cp_block = cell_parameters_wan_block(lattice=wan_nscf.structure.lattice)
+        self.cp_block = cell_parameters_wan_block(lattice=struc.lattice)
 
         self.kbands = None
         if plot_bands:
             self.kbands = kpoints_wan_block()
-            self.kbands.init_bpath_crystal(npts_first_seg = 100, struc=wan_nscf.structure)
+            self.kbands.init_bpath_crystal(npts_first_seg = 100, struc=struc)
 
     def __str__(self) -> str:
         class_as_str = ""
