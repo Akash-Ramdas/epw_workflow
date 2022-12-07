@@ -156,6 +156,7 @@ class proj_xml:
         nspin: int = int(root.find("./HEADER").attrib["NUMBER_OF_SPIN_COMPONENTS"].strip())
         natomwfc: int = int(root.find("./HEADER").attrib["NUMBER_OF_ATOMIC_WFC"].strip())
         num_electrons: float = float(root.find("./HEADER").attrib["NUMBER_OF_ELECTRONS"].strip())
+        ef: float = float(root.find("./HEADER").attrib["FERMI_ENERGY"].strip())
 
         projections: NDArrayFloat = np.zeros((num_kpts, natomwfc, num_bands), dtype=complex)
         eigen_energies: NDArrayFloat = np.zeros((num_kpts, num_bands))
@@ -187,6 +188,7 @@ class proj_xml:
         self.projections = projections
         self.real_projections = real_projections
         self.eigen_energies = eigen_energies
+        self.ef = ef
 
     def plot_info(self):
         y_plot = np.zeros((self.num_kpts, self.num_bands))
@@ -214,18 +216,82 @@ class proj_xml:
                     y_plot[i_kpt, i_bnd] = y_plot[i_kpt, i_bnd] + self.real_projections[i_kpt, i_wfc, i_bnd]
 
         y_plot = y_plot.reshape(self.num_kpts * self.num_bands)
-        x_plot = self.eigen_energies.copy().reshape(self.num_kpts * self.num_bands)
+        x_pre_plot = self.eigen_energies.copy().reshape(self.num_kpts * self.num_bands)
+        x_plot =x_pre_plot[(x_pre_plot < self.ef + 1e5/RYTOEV) & (x_pre_plot > self.ef - 1e5/RYTOEV)]
 
-        popt, pcov = curve_fit(erfc_func, x_plot, y_plot, method="dogbox")
+        y_plot_fin = y_plot[(x_pre_plot < self.ef + 1e5/RYTOEV) & (x_pre_plot > self.ef - 1e5/RYTOEV)]
 
+        print(x_plot.shape, y_plot_fin.shape, y_plot.shape)
+
+        popt, pcov = curve_fit(erfc_func, x_plot, y_plot_fin, method="lm")
+        perr = np.sqrt(np.diag(pcov))
+        print(perr*RYTOEV)
         if return_plot:
             fig = Figure()
             x_fit = np.arange(np.min(x_plot), np.max(x_plot), 0.01)
             y_fit = erfc_func(x_fit, popt[0], popt[1])
-            fig.add_trace(Scatter(x=x_plot, y=y_plot, name="mu_sigma", mode="markers"))
-            fig.add_trace(Scatter(x=x_fit, y=y_fit, name="fit", mode="lines"))
+            fig.add_trace(Scatter(x=(x_plot-self.ef)*RYTOEV, y=y_plot_fin, name="mu_sigma", mode="markers"))
+            fig.add_trace(Scatter(x=(x_fit-self.ef)*RYTOEV, y=y_fit, name="fit", mode="lines"))
         
         return popt[0]*RYTOEV, popt[1]*RYTOEV, self.num_bands, self.natomwfc, fig
 
 
-        
+def get_max_band(xml_file = "data-file-schema.xml"):
+    qeout = qe_xml(xml_file=xml_file)
+    return np.min(qeout.bands, axis=1) - qeout.ef
+
+class perturbo_bands:
+    def __init__(self, bands_fname: str) -> None:
+        self.k_dist, self.bands = self.parse_bands_file(bands_fname)
+
+    @staticmethod
+    def parse_bands_file(fname: str):
+        with open(fname, "r") as file:
+            tmp = file.readlines()
+        nlines = len(tmp)
+
+        n_bands = 0
+        n_k = 0
+        band_data = []
+        all_data = []
+        k_dist = []
+        for i_line in range(0, nlines):
+            info_tmp = tmp[i_line].strip().split()
+
+            if len(info_tmp) == 0:
+                if n_bands == 0:
+                    save_nk = n_k
+                n_bands = n_bands + 1
+                all_data.append(band_data)
+                band_data = []
+            else:
+                if n_bands == 0:
+                    k_dist.append(float(info_tmp[0]))
+                band_data.append(float(info_tmp[-1]))
+
+            n_k = n_k + 1
+
+        band_info = np.array(all_data, dtype=float)
+        k_dist = np.array(k_dist)
+
+        return k_dist, band_info
+    
+    def plot_bs(self, width=1000, height=600, colors=["Red", "Purple"], ef: float = 0) -> Figure:
+        fig = Figure()
+
+        color = colors[0]
+        nbnd, nk = self.bands.shape
+        print(nbnd, nk)
+        for i_bnd in range(0, nbnd):
+            sl = False
+            if i_bnd == 0:
+                sl = True
+
+            fig.add_trace(Scatter(y=self.bands[i_bnd] - ef, x=np.arange(0, nk), mode="lines", showlegend=sl,
+                                legendgroup="qe_bands", name="qe_bands",
+                                line=dict(color=color, dash="dash")))
+
+        #fig.update_xaxes(title="High Symmetry Path", ticktext=self.tic_text, tickmode="array",
+        #                 tickvals=self.tic_loc, tickangle=0)
+        fig.update_layout(width=width, height=height, showlegend=True)
+        return fig
